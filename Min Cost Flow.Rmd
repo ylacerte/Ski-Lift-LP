@@ -1,0 +1,406 @@
+---
+title: "Minimum Cost Maximum Flow"
+author: "Yves Lacerte"
+date: "`r Sys.Date()`"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: cosmo
+    vertical_layout: fill
+    orientation: rows
+
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyr)
+library(plotly)
+library(kableExtra)
+library(lpSolve) 
+library(ggraph)
+library(tidygraph)
+library(igraph)
+
+RV <- reactiveValues()
+
+from_source_to_lift <- data.frame(rbind(
+ c(from=1, to=2, cost=1, capacity=15, label="x12"),
+ c(from=1, to=3, cost=1, capacity=25, label="x13"),
+ c(from=1, to=4, cost=1, capacity=35, label="x14"),
+ c(from=1, to=5, cost=1, capacity=45, label="x15")
+))
+from_source_to_lift
+
+from_lift_to_sink <- data.frame(rbind(
+  c(from=2, to=6, cost=17, capacity=11, label="x26"),
+  c(from=3, to=6, cost=16, capacity=22, label="x36"),
+  c(from=4, to=6, cost=15, capacity=33, label="x46"),
+  c(from=5, to=6, cost=44, capacity=44, label="x56")
+))
+from_lift_to_sink
+
+arcs <- rbind(from_source_to_lift, from_lift_to_sink)
+
+nodes <- data.frame(rbind(
+  c(node=1, demand=-100, label="Parking lot"),
+  c(node=2, demand=  "", label="Lift 1"),
+  c(node=3, demand=  "", label="Lift 2"),
+  c(node=4, demand=  "", label="Lift 3"),
+  c(node=5, demand=  "", label="Lift 4"),
+  c(node=6, demand= 100, label="Top")
+))
+
+RV$arcs <- arcs
+RV$nodes=nodes
+
+```
+
+
+<b>0</b> {data-icon="fa-hockey-puck"}
+=====================================  
+
+Column {}
+-------------------------------------
+### <b>LP formulation</b>
+Given a directed graph G = (V, E): 
+
+  - each edge $(u,v)$ has a capacity ($u_{uv}$) and a cost($c_{uv}$)
+  - each vertex has a supply/demand $b_u$
+  - a flow of $f_{u,v}$ units on edge (u,v) contributes cost $c_{u,v} \cdot f_{u,v}$ to the objective function
+
+$\displaystyle{ Minimize \sum_{(u,v) \in E} c_{u,v} \cdot f_{u,v} }$
+
+Subject to
+
+$\displaystyle{ \,f_{u,v} \le u_{u,v} , \forall (u,v) \in E}$ (Capacity constraints)
+
+$\displaystyle{ \,\sum_{v \in V} f_{u,v} - \sum_{v \in V} f_{v,u} = b_v , \forall  u \in V }$ (Flow conservation)
+
+$\displaystyle{ \,f_{u,v} \geq 0 , \forall (u,v) \in E}$
+
+<br><br>
+A ski resort can be modeled as a min-cost max-flow network problem. The goal is to maximize skier movement while minimizing costs (e.g. wait time, time on lift) to the skiers.
+
+Suppose I have a certain number of skiers arriving per hour in the parking lot (supply node). Skiers move from the parking lot to one of 4 lifts. Each lift is different in terms of speed, and where it goes. Each lift has a capacity (e.g. how many skiers the lift can accommodate) and a cost (e.g. wait time and lift time). 
+
+The top of the mountain has a demand, which represents the desired number of skiers at the resort. 
+
+The quest is to find the best lift utilization that is cheapest overall, and maximizes the flow of skiers at the resort.
+
+
+### <b>The basic model ... $\sum supply = \sum demand$. </b>
+
+```{r, echo=FALSE}  
+
+type <- data.frame(type=rbind(
+  "parking lot (supply)", 
+  "Lift 1",   "Lift 2",   "Lift 3",   "Lift 4", 
+  "top (demand)"))
+
+ggraph(arcs, layout="sugiyama") +
+  theme(legend.position = "none", 
+        panel.background = element_rect(fill = "white",
+                                        colour = "white",
+                                        size = 0.5, linetype = "solid")) +
+  geom_edge_fan(aes(label = "cost"), label_pos=.6, alpha=.9) +
+  geom_edge_fan(aes(label = "capacity"), 
+    color='grey9', alpha=.9,
+    arrow = arrow(length = unit(5, 'mm')),
+    end_cap = circle(5, 'mm'),
+    label_pos=.5) +
+  geom_node_point() +
+  geom_node_label(aes(label = type$type))
+
+```
+
+
+<b>1</b> {data-icon="fa-hockey-puck"}
+=====================================  
+
+Column {data-height=200}
+-------------------------------------
+### <b>costs</b>
+```{r, echo=FALSE}
+
+tags$div(numericInput("c12", HTML("<b>Lift 1</b>"), from_source_to_lift$cost[1]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("c13", HTML("<b>Lift 2</b>"), from_source_to_lift$cost[2]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("c14", HTML("<b>Lift 3</b>"), from_source_to_lift$cost[3]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("c15", HTML("<b>Lift 4</b>"), from_source_to_lift$cost[3]), 
+         style="width: 20%; display:inline-block")
+HTML("<b>to lifts</b><br>")
+
+tags$div(numericInput("c26", HTML("<b>Lift 1</b>"), from_lift_to_sink$cost[1]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("c36", HTML("<b>Lift 2</b>"), from_lift_to_sink$cost[2]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("c46", HTML("<b>Lift 3</b>"), from_lift_to_sink$cost[3]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("c56", HTML("<b>Lift 4</b>"), from_lift_to_sink$cost[4]), 
+         style="width: 20%; display:inline-block")
+HTML("<b>to top</b>")
+
+```
+
+### <b>capacity</b>
+```{r, echo=FALSE}
+
+tags$div(numericInput("u12", HTML("<b>Lift 1</b>"), from_source_to_lift$capacity[1]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("u13", HTML("<b>Lift 2</b>"), from_source_to_lift$capacity[2]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("u14", HTML("<b>Lift 3</b>"), from_source_to_lift$capacity[3]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("u15", HTML("<b>Lift 4</b>"), from_source_to_lift$capacity[4]), 
+         style="width: 20%; display:inline-block")
+HTML("<b>to lifts</b><br>")
+
+tags$div(numericInput("u26", HTML("<b>Lift 1</b>"), from_lift_to_sink$capacity[1]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("u36", HTML("<b>Lift 2</b>"), from_lift_to_sink$capacity[2]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("u46", HTML("<b>Lift 3</b>"), from_lift_to_sink$capacity[3]), 
+         style="width: 20%; display:inline-block")
+tags$div(numericInput("u56", HTML("<b>Lift 4</b>"), from_lift_to_sink$capacity[4]), 
+         style="width: 20%; display:inline-block")
+HTML("<b>to top</b>")
+
+```
+
+### <b>supply and demand (must add to 0)</b>
+```{r, echo=FALSE}
+
+tags$div(numericInput("n1", HTML("<b>parking lot</b>"), nodes$demand[1]), 
+         style="width: 25%; display:inline-block")
+tags$div(numericInput("n6", HTML("<b>top</b>"), nodes$demand[6]), 
+         style="width: 25%; display:inline-block")
+HTML("<br><br>")
+
+actionButton("reset", "reset")
+actionButton("solve", "solve")
+
+```
+
+```{r, echo=FALSE}
+
+observeEvent(input$reset, {
+  updateNumericInput(session,"c12", value=from_source_to_lift$cost[1])
+  updateNumericInput(session,"c13", value=from_source_to_lift$cost[2])
+  updateNumericInput(session,"c14", value=from_source_to_lift$cost[3])
+  updateNumericInput(session,"c15", value=from_source_to_lift$cost[4])
+  updateNumericInput(session,"c26", value=from_lift_to_sink$cost[1])
+  updateNumericInput(session,"c36", value=from_lift_to_sink$cost[2])
+  updateNumericInput(session,"c46", value=from_lift_to_sink$cost[3])
+  updateNumericInput(session,"c56", value=from_lift_to_sink$cost[4])
+
+  updateNumericInput(session,"u12", value=from_source_to_lift$capacity[1])
+  updateNumericInput(session,"u13", value=from_source_to_lift$capacity[2])
+  updateNumericInput(session,"u14", value=from_source_to_lift$capacity[3])
+  updateNumericInput(session,"u15", value=from_source_to_lift$capacity[4])
+  updateNumericInput(session,"u26", value=from_lift_to_sink$capacity[1])
+  updateNumericInput(session,"u36", value=from_lift_to_sink$capacity[2])
+  updateNumericInput(session,"u46", value=from_lift_to_sink$capacity[3])
+  updateNumericInput(session,"u56", value=from_lift_to_sink$capacity[4])
+  
+  updateNumericInput(session,"n1", value=nodes$demand[1])
+  updateNumericInput(session,"n6", value=nodes$demand[6])
+  
+})
+
+```
+
+```{r, echo=FALSE}
+
+observeEvent(input$c12, {RV$arcs[1,c(3,4)] <- c(input$c12, input$u12)})
+observeEvent(input$u12, {RV$arcs[1,c(3,4)] <- c(input$c12, input$u12)})
+
+observeEvent(input$c13, {RV$arcs[2,c(3,4)] <- c(input$c13, input$u13)})
+observeEvent(input$u13, {RV$arcs[2,c(3,4)] <- c(input$c13, input$u13)})
+
+observeEvent(input$c14, {RV$arcs[3,c(3,4)] <- c(input$c14, input$u14)})
+observeEvent(input$u14, {RV$arcs[3,c(3,4)] <- c(input$c14, input$u14)})
+
+observeEvent(input$c15, {RV$arcs[4,c(3,4)] <- c(input$c15, input$u15)})
+observeEvent(input$u15, {RV$arcs[4,c(3,4)] <- c(input$c15, input$u15)})
+
+observeEvent(input$c26, {RV$arcs[5,c(3,4)] <- c(input$c26, input$u26)})
+observeEvent(input$u26, {RV$arcs[5,c(3,4)] <- c(input$c26, input$u26)})
+
+observeEvent(input$c36, {RV$arcs[6,c(3,4)] <- c(input$c36, input$u36)})
+observeEvent(input$u36, {RV$arcs[6,c(3,4)] <- c(input$c36, input$u36)})
+
+observeEvent(input$c46, {RV$arcs[7,c(3,4)] <- c(input$c46, input$u46)})
+observeEvent(input$u46, {RV$arcs[7,c(3,4)] <- c(input$c46, input$u46)})
+
+observeEvent(input$c56, {RV$arcs[8,c(3,4)] <- c(input$c56, input$u56)})
+observeEvent(input$u56, {RV$arcs[8,c(3,4)] <- c(input$c56, input$u56)})
+
+observeEvent(input$n1, {RV$nodes$demand[1] <- input$n1})
+observeEvent(input$n6, {RV$nodes$demand[6] <- input$n6})
+
+```
+
+```{r, echo=FALSE}
+
+observeEvent(input$solve, {
+  arcs <- RV$arcs
+  nodes <- RV$nodes
+  
+  Narcs  <- nrow(arcs)
+  Nnodes <- nrow(nodes)
+
+# constraints matrix
+  C <- matrix(0, nrow=Nnodes+Narcs, ncol=Narcs, byrow=TRUE)
+  colnames(C) <- arcs$label
+  rownames(C) <- rep("",nrow(C))
+  dir <- rep("=",Nnodes+Narcs)
+  rhs <- rep("0", Nnodes+Narcs)
+
+# source supply ... negative flow
+  C[1,1:4] <- -1 ; dir[1] <- "=" ; rhs[1] <- nodes$demand[1]
+  rownames(C)[1] <- "supply"
+
+# sink demand
+  C[2,5:8] <-  1 ; dir[2] <- "=" ; rhs[2] <- nodes$demand[6]
+  rownames(C)[2] <- "demand"
+  
+
+# for each node, what goes in and what comes out
+  for ( i in 2:(Nnodes-1) ) {
+    from <- which(arcs$from == i)
+    to <- which(arcs$to == i)
+    if ( length(from) > 0 ) C[i+1, from] <- 1
+    if ( length(to) > 0 ) C[i+1, to] <- -1
+    rownames(C)[i+1] <- paste0("lift_",i-1)
+  }
+
+# capacity of each arc
+  j <- 1 
+  for ( i in 1:Narcs ) {
+    C[i+Nnodes, j] <- 1
+    rownames(C)[i+Nnodes] <- paste0("arc_",arcs$label[i])
+    dir[i+Nnodes] <- "<="
+    rhs[i+Nnodes] <- arcs$capacity[i]
+    j <- j + 1
+  }
+
+out.C <- cbind(C,dir,rhs)
+
+  
+# objective function
+  obj <- arcs$cost
+
+
+  sol <- lp ("min", obj, C, dir, rhs)
+  
+  arcs$sol <- sol$solution
+  
+  out.obj <- data.frame(t(obj))
+  colnames(out.obj) <- colnames(C)
+  rownames(out.obj) <- "objective"
+  out.obj$dir <- "="
+  out.obj$rhs <- sol$objval
+
+  out1 <- rbind(out.obj, "")
+  out <- rbind(out1, out.C)
+  rownames(out)[2] <- ""
+
+  out$sol <- ""
+  out$sol[9:16] <- sol$solution
+
+  RV$arcs <- arcs
+
+  RV$out <- out
+  
+  print(paste("number of rows", nrow(out)))
+  print(rownames(out))
+  
+})
+
+```
+
+Column {}
+-------------------------------------
+### <b></b>
+```{r, echo=FALSE}
+
+renderPlot({
+  
+ggraph(RV$arcs, layout="sugiyama") +
+  theme(legend.position = "none", 
+        panel.background = element_rect(fill = "white",
+                                        colour = "white",
+                                        size = 0.5, linetype = "solid")) +
+  geom_edge_fan(aes(label = paste0("$", cost), width=1), 
+                label_pos=.7, alpha=.1) +
+  geom_edge_fan(aes(
+    label = capacity), 
+    color='grey9', alpha=.1,
+    arrow = arrow(length = unit(4, 'mm')),
+    end_cap = circle(4, 'mm'),
+    label_pos=.3) +
+  geom_node_point() +
+  geom_node_label(aes(label = paste0(RV$nodes$label, "\n(", RV$nodes$demand,")"))) 
+
+})
+
+```
+
+### <b></b>
+```{r, echo=FALSE}
+
+renderPlot({
+
+  if ( input$solve >= 1 ) {
+    ggraph(RV$arcs, layout="sugiyama") +
+      theme(legend.position = "none", 
+            panel.background = element_rect(fill = "white",
+                                            colour = "white",
+                                            size = 0.5, linetype = "solid")) +
+      geom_edge_fan(aes(label = sol, width=sol, color=2), 
+                     alpha=.2, arrow = arrow(length = unit(4, 'mm')),
+                     end_cap = circle(4, 'mm'),
+                     label_pos=.3) +
+      geom_node_point() +
+      geom_node_label(aes(label = RV$nodes$label)) 
+
+  }
+
+  })
+
+```
+
+<b>2</b> {data-icon="fa-hockey-puck"}
+=====================================  
+
+Row {}
+-------------------------------------
+### <b>model</b>
+```{r, echo=FALSE}
+renderUI({
+  HTML(RV$out %>% 
+         kbl(align="llllllllcr") %>% 
+         kable_styling(full_width = F))
+})
+```
+
+### <b></b>
+
+The first 4 column describes the top half of the problem (from parking lot to the lift). The next four columns describe the lift system to the top of the mountain.
+
+The first row is the objective function and its optimal value(column *rhs*). The first 4 costs represent costs associated with moving from the parking lot to each lift.
+The next 4 costs represent costs to use the lift. This could be a proxy for wait time and lift time. The optimal cost can be a proxy for overall skier satisfaction.
+
+The next two rows are the supply and demand nodes (parking lot and top of the mountain). Note supply = demand.
+
+The next four rows are the flow constraints imposed on each lift. This represents all skiers that get on the lift get off at the top of the mountain. We don't lose skiers!
+
+The next 4 rows are capacities from the parking lot to each lift. This represents a distribution of skier preferences (e.g. more skiers choose a lift because of its greater variety of terrain, while less skiers choose another lift because of its expert terrain.)
+
+The next 4 rows are capacities from each lift to the top of the mountain. Each capacity represents maximum potential lift utilization. 
+
+The last column represents the optimal lift utilization.
+
