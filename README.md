@@ -8,4 +8,4 @@ The top of the mountain has a demand, which represents the desired number of ski
 
 The quest is to find the best lift utilization that is cheapest overall, and maximizes the flow of skiers at the resort. 
 
-A Linear Program (LP) model is formulated and solve in a R shiny application.
+A Linear Program (LP) model is formulated and solved in a R shiny application.
